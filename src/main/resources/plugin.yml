@@ -1,0 +1,70 @@
+name: CreatorHQRecording
+prefix: Creator HQ Recording
+version: 2.0.0
+authors: [NotHeartYT]
+main: com.creatorhq.CreatorHQ
+api-version: '1.20'
+description: Creator HQ Recording - recording server admin tools
+commands:
+  creator:
+    description: Creator HQ Recording main command
+    usage: /creator <subcommand>
+    aliases: [smp]
+permissions:
+  creatorhq.admin:
+    default: op
+    children:
+      creatorhq.advancement: true
+      creatorhq.messages: true
+      creatorhq.player: true
+      creatorhq.nickname: true
+      creatorhq.mute: true
+      creatorhq.ban: true
+      creatorhq.freeze: true
+      creatorhq.jail: true
+      creatorhq.vanish: true
+      creatorhq.inventory: true
+      creatorhq.teleport: true
+      creatorhq.kit: true
+      creatorhq.give: true
+      creatorhq.givekit: true
+      creatorhq.notify: true
+      creatorhq.vanish.see: true
+      creatorhq.mute.bypass: true
+      creatorhq.freeze.bypass: true
+  creatorhq.advancement:
+    default: op
+  creatorhq.messages:
+    default: op
+  creatorhq.player:
+    default: op
+  creatorhq.nickname:
+    default: op
+  creatorhq.mute:
+    default: op
+  creatorhq.ban:
+    default: op
+  creatorhq.freeze:
+    default: op
+  creatorhq.jail:
+    default: op
+  creatorhq.vanish:
+    default: op
+  creatorhq.inventory:
+    default: op
+  creatorhq.teleport:
+    default: op
+  creatorhq.kit:
+    default: op
+  creatorhq.give:
+    default: op
+  creatorhq.givekit:
+    default: op
+  creatorhq.notify:
+    default: op
+  creatorhq.vanish.see:
+    default: op
+  creatorhq.mute.bypass:
+    default: op
+  creatorhq.freeze.bypass:
+    default: op
