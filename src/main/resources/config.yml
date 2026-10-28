@@ -25,3 +25,14 @@ removeitem:
   default-material: ""
 audit:
   enabled: true
+vanish:
+  persist: true
+  staff-can-see: false
+  see-permission: "creatorhq.vanish.see"
+  suppress-join-quit: true
+invrollback:
+  enabled: true
+  max-snapshots: 10
+  require-confirm: true
+keepinventory:
+  keep-level: true
