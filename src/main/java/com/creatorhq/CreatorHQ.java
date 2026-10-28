@@ -58,7 +58,8 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
     static {
         String[][] t = {
             {"creatorhq.advancement", "advancement", "advancementall"},
-            {"creatorhq.messages", "joinmessages", "leavemessages", "deathmessages", "keepinventory", "feedback"},
+            {"creatorhq.messages", "joinmessages", "leavemessages", "deathmessages", "feedback"},
+            {"creatorhq.keepinventory", "keepinventory"},
             {"creatorhq.player", "invulnerable", "invulnerableall", "immortal", "feed", "heal"},
             {"creatorhq.nickname", "nickname"},
             {"creatorhq.mute", "mute", "unmute", "muteall", "unmuteall", "cleartimers"},
@@ -66,7 +67,9 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
             {"creatorhq.freeze", "freeze", "unfreeze", "freezeall", "unfreezeall"},
             {"creatorhq.jail", "jail", "unjail"},
             {"creatorhq.vanish", "vanish"},
+            {"creatorhq.unvanish", "unvanish"},
             {"creatorhq.inventory", "clearitems", "removeitem"},
+            {"creatorhq.invrollback", "invrollback", "invrestore"},
             {"creatorhq.teleport", "tp", "tplook"},
             {"creatorhq.kit", "kit"},
             {"creatorhq.give", "give"},
@@ -76,7 +79,7 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
     }
     static final Map<String, String> GK = Map.of(
         "joinmessages", "joinMessages", "leavemessages", "leaveMessages", "deathmessages", "deathMessages",
-        "keepinventory", "keepInventory", "feedback", "feedback", "advancementall", "advancementAll",
+        "feedback", "feedback", "advancementall", "advancementAll",
         "muteall", "muteAll", "freezeall", "freezeAll", "invulnerableall", "invulnerableAll");
     static final Map<String, Boolean> GD = Map.of(
         "advancementAll", true, "joinMessages", true, "leaveMessages", true, "deathMessages", true,
@@ -84,12 +87,13 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
     static final List<String> BOOL = List.of("true", "false");
     static final List<String> DURS = List.of("10s", "10m", "1h", "1d", "7d", "permanent");
 
-    Store data, pun, kits, msgs;
+    Store data, pun, kits, msgs, snaps;
     final Map<String, Boolean> G = new ConcurrentHashMap<>();
     final Set<UUID> advHidden = ConcurrentHashMap.newKeySet();
     final Set<UUID> invuln = ConcurrentHashMap.newKeySet();
     final Set<UUID> immortal = ConcurrentHashMap.newKeySet();
     final Set<UUID> vanished = ConcurrentHashMap.newKeySet();
+    final Map<UUID, Boolean> kiPlayer = new ConcurrentHashMap<>();
     final Map<UUID, String> nicks = new ConcurrentHashMap<>();
     final Map<UUID, String> frozen = new ConcurrentHashMap<>();
     final Map<UUID, Location> jailed = new ConcurrentHashMap<>();
@@ -108,6 +112,7 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
         pun = new Store(this, "punishments.yml");
         kits = new Store(this, "kits.yml");
         msgs = new Store(this, "messages.yml");
+        snaps = new Store(this, "snapshots.yml");
         loadState();
         loadJail();
         Bukkit.getPluginManager().registerEvents(this, this);
@@ -127,7 +132,7 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
             if (e != null) e.remove();
         }
         for (Player p : Bukkit.getOnlinePlayers()) setTagHidden(p, false);
-        for (Store s : List.of(data, pun, kits, msgs)) s.flush(false);
+        for (Store s : List.of(data, pun, kits, msgs, snaps)) s.flush(false);
     }
 
     void loadState() {
@@ -135,6 +140,7 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
         if (gs != null) for (String k : gs.getKeys(false)) G.put(k, gs.getBoolean(k));
         var ps = data.cfg.getConfigurationSection("players");
         boolean persist = getConfig().getBoolean("freeze.persist", true);
+        boolean vpersist = getConfig().getBoolean("vanish.persist", true);
         if (ps != null) for (String k : ps.getKeys(false)) {
             UUID id;
             try { id = UUID.fromString(k); } catch (Exception e) { continue; }
@@ -143,7 +149,8 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
             if (s.getBoolean("advHidden")) advHidden.add(id);
             if (s.getBoolean("invulnerable")) invuln.add(id);
             if (s.getBoolean("immortal")) immortal.add(id);
-            if (s.getBoolean("vanished")) vanished.add(id);
+            if (vpersist && s.getBoolean("vanished")) vanished.add(id);
+            if (s.contains("keepInv")) kiPlayer.put(id, s.getBoolean("keepInv"));
             if (s.getString("nick") != null) nicks.put(id, s.getString("nick"));
             if (persist && s.getString("frozen") != null) frozen.put(id, s.getString("frozen"));
             if (s.get("jail") instanceof Location l) jailed.put(id, l);
@@ -311,6 +318,90 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
         for (World w : Bukkit.getWorlds()) w.setGameRule(GameRule.SEND_COMMAND_FEEDBACK, b);
     }
 
+    // ---------------------------------------------------------------- inventory snapshots
+
+    static boolean emp(ItemStack i) { return i == null || i.getType().isAir(); }
+    static boolean same(ItemStack a, ItemStack b) { return (emp(a) && emp(b)) || (!emp(a) && !emp(b) && a.equals(b)); }
+    static ItemStack[] cl(ItemStack[] a) {
+        ItemStack[] r = new ItemStack[a.length];
+        for (int i = 0; i < a.length; i++) r[i] = a[i] == null ? null : a[i].clone();
+        return r;
+    }
+    boolean invEmpty(PlayerInventory inv) {
+        for (ItemStack i : inv.getStorageContents()) if (!emp(i)) return false;
+        for (ItemStack i : inv.getArmorContents()) if (!emp(i)) return false;
+        for (ItemStack i : inv.getExtraContents()) if (!emp(i)) return false;
+        return true;
+    }
+    boolean invMatches(PlayerInventory inv, ItemStack[][] d) {
+        ItemStack[] st = inv.getStorageContents(), ar = inv.getArmorContents(), ex = inv.getExtraContents();
+        for (int i = 0; i < 36; i++) if (!same(i < st.length ? st[i] : null, d[0][i])) return false;
+        for (int i = 0; i < 4; i++) if (!same(i < ar.length ? ar[i] : null, d[1][i])) return false;
+        if (!same(ex.length > 0 ? ex[0] : null, d[2][0])) return false;
+        return true;
+    }
+
+    List<String> snapIds(UUID u) {
+        List<String> l = new ArrayList<>();
+        var sec = snaps.cfg.getConfigurationSection("snapshots." + u);
+        if (sec != null) for (String k : sec.getKeys(false)) if (k.matches("t\\d+")) l.add(k);
+        l.sort((x, y) -> Long.compare(Long.parseLong(y.substring(1)), Long.parseLong(x.substring(1))));
+        return l;
+    }
+
+    void prune(UUID u) {
+        int max = Math.max(1, getConfig().getInt("invrollback.max-snapshots", 10));
+        List<String> ids = snapIds(u);
+        for (int i = max; i < ids.size(); i++) snaps.cfg.set("snapshots." + u + "." + ids.get(i), null);
+        snaps.touch();
+    }
+
+    boolean snapFrom(UUID u, String name, String op, String by, ItemStack[] st, ItemStack[] ar, ItemStack[] ex, boolean prune) {
+        if (!getConfig().getBoolean("invrollback.enabled", true)) return false;
+        long time = System.currentTimeMillis();
+        while (snaps.cfg.contains("snapshots." + u + ".t" + time)) time++;
+        String base = "snapshots." + u + ".t" + time;
+        int count = 0;
+        for (int i = 0; i < st.length; i++) if (!emp(st[i])) { snaps.cfg.set(base + ".slots.s" + i, st[i].clone()); count++; }
+        for (int i = 0; i < ar.length; i++) if (!emp(ar[i])) { snaps.cfg.set(base + ".slots.a" + i, ar[i].clone()); count++; }
+        for (int i = 0; i < ex.length; i++) if (!emp(ex[i])) { snaps.cfg.set(base + ".slots.o" + i, ex[i].clone()); count++; }
+        if (count == 0) return false;
+        snaps.cfg.set(base + ".uuid", u.toString());
+        snaps.cfg.set(base + ".name", name);
+        snaps.cfg.set(base + ".time", time);
+        snaps.cfg.set(base + ".op", op);
+        snaps.cfg.set(base + ".by", by);
+        snaps.touch();
+        if (prune) prune(u);
+        return true;
+    }
+    boolean snap(Player p, String op, String by) {
+        PlayerInventory inv = p.getInventory();
+        return snapFrom(p.getUniqueId(), p.getName(), op, by, inv.getStorageContents(), inv.getArmorContents(), inv.getExtraContents(), true);
+    }
+
+    /** Returns {storage[36], armor[4], extra[1]} or null if the snapshot is missing, foreign or corrupt. */
+    ItemStack[][] readSnap(UUID u, String id) {
+        String base = "snapshots." + u + "." + id;
+        if (!u.toString().equals(snaps.cfg.getString(base + ".uuid", ""))) return null;
+        var sec = snaps.cfg.getConfigurationSection(base + ".slots");
+        if (sec == null) return null;
+        ItemStack[] st = new ItemStack[36], ar = new ItemStack[4], ex = new ItemStack[1];
+        for (String k : sec.getKeys(false)) {
+            if (!(sec.get(k) instanceof ItemStack it)) return null;
+            try {
+                int idx = Integer.parseInt(k.substring(1));
+                switch (k.charAt(0)) {
+                    case 's' -> { if (idx < 0 || idx >= 36) return null; st[idx] = it; }
+                    case 'a' -> { if (idx < 0 || idx >= 4) return null; ar[idx] = it; }
+                    case 'o' -> { if (idx != 0) return null; ex[0] = it; }
+                    default -> { return null; }
+                }
+            } catch (Exception e) { return null; }
+        }
+        return new ItemStack[][]{st, ar, ex};
+    }
+
     // ---------------------------------------------------------------- nickname
 
     void applyNick(Player p) {
@@ -369,7 +460,11 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
 
     // ---------------------------------------------------------------- vanish / freeze
 
-    boolean canSee(Player v) { return v.hasPermission("creatorhq.vanish.see"); }
+    /** Can this viewer see vanished players? Default: nobody (even OPs) unless vanish.staff-can-see is true. */
+    boolean canSee(Player viewer) {
+        return getConfig().getBoolean("vanish.staff-can-see", false)
+                && viewer.hasPermission(getConfig().getString("vanish.see-permission", "creatorhq.vanish.see"));
+    }
 
     void applyVanish(Player v) {
         boolean on = vanished.contains(v.getUniqueId());
@@ -377,9 +472,24 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
         for (Player o : Bukkit.getOnlinePlayers()) {
             if (o.equals(v)) continue;
             boolean hide = on && !canSee(o);
+            // hidePlayer/showPlayer are per-plugin: we only ever undo our own hide.
             if (hide) o.hidePlayer(this, v); else o.showPlayer(this, v);
             if (td != null) { if (hide) o.hideEntity(this, td); else o.showEntity(this, td); }
         }
+    }
+
+    boolean verifyVanish(Player v) {
+        for (Player o : Bukkit.getOnlinePlayers()) {
+            if (o.equals(v) || canSee(o)) continue;
+            if (o.canSee(v)) return false;
+        }
+        return true;
+    }
+
+    List<String> vanishNames(boolean vanishedOnes) {
+        List<String> l = new ArrayList<>();
+        for (Player p : Bukkit.getOnlinePlayers()) if (vanished.contains(p.getUniqueId()) == vanishedOnes) l.add(p.getName());
+        return l;
     }
 
     void freeze(Player p, String src) {
@@ -445,7 +555,7 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
                 say(s, b ? "adv-on" : "adv-off", b ? "Advancement announcements enabled for {0}."
                         : "Advancement announcements disabled for {0}.", label(ts));
             }
-            case "joinmessages", "leavemessages", "deathmessages", "keepinventory", "feedback",
+            case "joinmessages", "leavemessages", "deathmessages", "feedback",
                  "advancementall", "muteall", "freezeall", "invulnerableall" -> {
                 Boolean b = n < 2 ? null : bool(a[1]);
                 if (b == null) { usage(s, sub + " <true|false>"); return; }
@@ -462,6 +572,36 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
                 say(s, "global-set", "Global {0} is now {1}.", sub, b ? "ON (true)" : "OFF (false)");
                 if (sub.equals("muteall"))
                     Bukkit.broadcastMessage(t(b ? "muteall-on" : "muteall-off", b ? "Chat has been muted." : "Chat has been unmuted."));
+            }
+            case "keepinventory" -> {
+                if (n == 2 && bool(a[1]) != null) {
+                    boolean b = bool(a[1]);
+                    sg("keepInventory", b);
+                    say(s, "ki-global", "Global Keep Inventory setting updated successfully ({0}).", b);
+                    return;
+                }
+                if (n == 3) {
+                    if (!s.hasPermission("creatorhq.keepinventory.player")) {
+                        say(s, "no-perm", "&cYou do not have permission to use this command."); return;
+                    }
+                    OfflinePlayer o = off(a[1]);
+                    if (o == null) { say(s, "not-found", "&cPlayer not found: {0}", a[1]); return; }
+                    UUID id = o.getUniqueId();
+                    String nm = nameOf(o, a[1]);
+                    if (a[2].equalsIgnoreCase("reset")) {
+                        kiPlayer.remove(id);
+                        sp(id, "keepInv", null);
+                        say(s, "ki-reset", "Individual Keep Inventory setting reset for {0}.", nm);
+                    } else {
+                        Boolean b = bool(a[2]);
+                        if (b == null) { bad(s); return; }
+                        kiPlayer.put(id, b);
+                        sp(id, "keepInv", b);
+                        say(s, b ? "ki-on" : "ki-off", b ? "Keep Inventory enabled for {0}." : "Keep Inventory disabled for {0}.", nm);
+                    }
+                    return;
+                }
+                usage(s, "keepinventory <true|false> | keepinventory <player> <true|false|reset>");
             }
             case "unmuteall" -> {
                 sg("muteAll", false);
@@ -602,28 +742,44 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
                     say(s, "unjailed", "{0} has been released.", p.getName());
                 } else say(s, "tp-failed", "&cTeleport failed, player stays jailed.");
             }
-            case "vanish" -> {
+            case "vanish", "unvanish" -> {
+                boolean want = sub.equals("vanish");
                 Player p;
                 if (n >= 2) { p = online(s, a[1]); if (p == null) return; }
                 else if (s instanceof Player me) p = me;
-                else { usage(s, "vanish <player>"); return; }
-                boolean on = !vanished.contains(p.getUniqueId());
-                flag(vanished, "vanished", p.getUniqueId(), on);
+                else { usage(s, sub + " <player>"); return; }
+                UUID id = p.getUniqueId();
+                if (want == vanished.contains(id)) {
+                    if (want) say(s, "already-vanished", "&cPlayer {0} is already vanished.", p.getName());
+                    else say(s, "not-vanished", "&cPlayer {0} is not currently vanished.", p.getName());
+                    return;
+                }
+                flag(vanished, "vanished", id, want);
                 applyVanish(p);
-                say(p, on ? "vanish-on" : "vanish-off", on ? "Vanish ON - hidden from ordinary players." : "Vanish OFF - visible to everyone.");
-                if (!s.equals(p)) say(s, "vanish-other", "Vanish for {0} is now {1}.", p.getName(), on);
+                if (want && !verifyVanish(p)) {
+                    flag(vanished, "vanished", id, false);
+                    applyVanish(p);
+                    say(s, "vanish-failed", "&cVanish failed: some players could still see {0}. No changes were kept.", p.getName());
+                    return;
+                }
+                if (want) say(s, "vanish-on", "Player {0} is now vanished.", p.getName());
+                else say(s, "vanish-off", "Player {0} is now visible.", p.getName());
+                if (!s.equals(p)) say(p, want ? "vanish-you-on" : "vanish-you-off",
+                        want ? "You are now vanished." : "You are now visible.");
             }
             case "clearitems" -> {
                 if (n < 2) { usage(s, "clearitems <player|@a>"); return; }
                 List<Player> ts = sel(s, a[1]);
                 if (ts == null) return;
+                int made = 0;
                 for (Player p : ts) {
+                    if (snap(p, "clearitems", s.getName())) made++;
                     PlayerInventory inv = p.getInventory();
                     inv.setStorageContents(new ItemStack[inv.getStorageContents().length]);
                     if (getConfig().getBoolean("clearitems.include-armor", true)) inv.setArmorContents(new ItemStack[4]);
                     if (getConfig().getBoolean("clearitems.include-offhand", true)) inv.setItemInOffHand(new ItemStack(Material.AIR));
                 }
-                say(s, "cleared", "Inventory cleared for {0}.", label(ts));
+                say(s, "cleared", "Inventory cleared for {0}. Snapshots saved: {1}.", label(ts), made);
             }
             case "removeitem" -> {
                 List<Player> ts;
@@ -638,12 +794,76 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
                     say(s, "no-material", "&cNo valid material. Set removeitem.default-material in config.yml or use /creator removeitem <player|@a> <material>");
                     return;
                 }
-                int total = 0;
+                int total = 0, made = 0;
                 for (Player p : ts) {
-                    for (ItemStack it : p.getInventory().getContents()) if (it != null && it.getType() == m) total += it.getAmount();
+                    int c = 0;
+                    for (ItemStack it : p.getInventory().getContents()) if (it != null && it.getType() == m) c += it.getAmount();
+                    if (c > 0 && snap(p, "removeitem", s.getName())) made++;
                     p.getInventory().remove(m);
+                    total += c;
                 }
-                say(s, "removed", "Removed {0} x{1} from {2}.", m.name(), total, label(ts));
+                say(s, "removed", "Removed {0} x{1} from {2}. Snapshots saved: {3}.", m.name(), total, label(ts), made);
+            }
+            case "invrollback", "invrestore" -> {
+                if (n < 2) { usage(s, "invrollback <player> [list|latest|<number>] [confirm]"); return; }
+                Player p = online(s, a[1]);
+                if (p == null) return;
+                UUID id = p.getUniqueId();
+                List<String> ids = snapIds(id);
+                if (n >= 3 && a[2].equalsIgnoreCase("list")) {
+                    if (!s.hasPermission("creatorhq.invrollback.list")) {
+                        say(s, "no-perm", "&cYou do not have permission to use this command."); return;
+                    }
+                    if (ids.isEmpty()) { say(s, "no-snap", "&cNo valid inventory snapshot exists for {0}.", p.getName()); return; }
+                    say(s, "snap-list", "Snapshots for {0} (1 = newest):", p.getName());
+                    for (int i = 0; i < ids.size(); i++) {
+                        String base = "snapshots." + id + "." + ids.get(i);
+                        s.sendMessage(ChatColor.GRAY + "" + (i + 1) + ". " + new Date(snaps.cfg.getLong(base + ".time"))
+                                + " - " + snaps.cfg.getString(base + ".op", "?") + " by " + snaps.cfg.getString(base + ".by", "?"));
+                    }
+                    return;
+                }
+                if (ids.isEmpty()) { say(s, "no-snap", "&cNo valid inventory snapshot exists for {0}.", p.getName()); return; }
+                int idx = 0;
+                boolean confirm = false;
+                for (int i = 2; i < n; i++) {
+                    if (a[i].equalsIgnoreCase("confirm")) confirm = true;
+                    else if (a[i].equalsIgnoreCase("latest")) idx = 0;
+                    else {
+                        try { idx = Integer.parseInt(a[i]) - 1; }
+                        catch (NumberFormatException e) { bad(s); return; }
+                    }
+                }
+                if (idx < 0 || idx >= ids.size()) {
+                    say(s, "snap-index", "&cNo snapshot with that number. Use /creator invrollback {0} list", p.getName()); return;
+                }
+                ItemStack[][] sd = readSnap(id, ids.get(idx));
+                if (sd == null) {
+                    say(s, "rollback-failed", "&cInventory rollback failed. No changes were applied.");
+                    audit("INVROLLBACK FAILED (unreadable snapshot) by " + s.getName() + " target=" + p.getName());
+                    return;
+                }
+                PlayerInventory inv = p.getInventory();
+                boolean curEmpty = invEmpty(inv);
+                if (!curEmpty && getConfig().getBoolean("invrollback.require-confirm", true) && !confirm) {
+                    say(s, "rollback-confirm", "&e{0} has items now. Rollback will REPLACE them (a backup snapshot is saved first). Run again: /creator invrollback {0} {1} confirm", p.getName(), idx + 1);
+                    return;
+                }
+                ItemStack[] bs = cl(inv.getStorageContents()), ba = cl(inv.getArmorContents()), be = cl(inv.getExtraContents());
+                if (!curEmpty) snapFrom(id, p.getName(), "pre-rollback", s.getName(), bs, ba, be, false);
+                inv.setStorageContents(cl(sd[0]));
+                inv.setArmorContents(cl(sd[1]));
+                inv.setExtraContents(cl(sd[2]));
+                if (!invMatches(inv, sd)) {
+                    inv.setStorageContents(bs); inv.setArmorContents(ba); inv.setExtraContents(be);
+                    say(s, "rollback-failed", "&cInventory rollback failed. No changes were applied.");
+                    audit("INVROLLBACK FAILED (verification) by " + s.getName() + " target=" + p.getName());
+                    return;
+                }
+                prune(id);
+                say(s, "rollback-ok", "Inventory rollback completed successfully for {0}.", p.getName());
+                say(p, "rollback-you", "&aYour inventory has been restored by staff.");
+                audit("INVROLLBACK by " + s.getName() + " target=" + p.getName() + " snapshot=" + (idx + 1));
             }
             case "tp" -> {
                 if (n == 2) {
@@ -688,11 +908,13 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
                 reloadConfig();
                 msgs.reload(); kits.reload();
                 loadJail();
+                for (Player p : Bukkit.getOnlinePlayers()) if (vanished.contains(p.getUniqueId())) applyVanish(p);
                 List<String> w = new ArrayList<>();
                 String dm = getConfig().getString("removeitem.default-material", "");
                 if (dm != null && !dm.isBlank() && Material.matchMaterial(dm) == null) w.add("removeitem.default-material is invalid: " + dm);
                 if (getConfig().get("jail.location") != null && jl == null) w.add("jail.location is invalid");
                 if (getConfig().getInt("punish.max-duration-days", 365) < 1) w.add("punish.max-duration-days must be at least 1");
+                if (getConfig().getInt("invrollback.max-snapshots", 10) < 1) w.add("invrollback.max-snapshots must be at least 1");
                 say(s, "reloaded", "Configuration reloaded.");
                 for (String x : w) s.sendMessage(ChatColor.RED + "Config warning: " + x);
             }
@@ -823,11 +1045,28 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
         switch (sub) {
             case "advancement" -> { if (i == 2) o = players(true); else if (i == 3) o.addAll(BOOL); }
             case "invulnerable", "immortal" -> { if (i == 2) o = players(false); else if (i == 3) o.addAll(BOOL); }
-            case "joinmessages", "leavemessages", "deathmessages", "keepinventory", "feedback",
+            case "joinmessages", "leavemessages", "deathmessages", "feedback",
                  "advancementall", "muteall", "freezeall", "invulnerableall" -> { if (i == 2) o.addAll(BOOL); }
+            case "keepinventory" -> {
+                if (i == 2) {
+                    o.addAll(BOOL);
+                    if (s.hasPermission("creatorhq.keepinventory.player")) o.addAll(players(false));
+                } else if (i == 3 && s.hasPermission("creatorhq.keepinventory.player")) {
+                    o.addAll(BOOL);
+                    o.add("reset");
+                }
+            }
             case "unmuteall" -> { if (i == 2) o.add("players"); }
-            case "feed", "heal", "freeze", "unfreeze", "unjail", "tplook", "vanish" -> { if (i == 2) o = players(false); }
-            case "cleartimers" -> { if (i == 2) o = players(false); }
+            case "feed", "heal", "freeze", "unfreeze", "unjail", "tplook", "cleartimers" -> { if (i == 2) o = players(false); }
+            case "vanish" -> { if (i == 2) o = vanishNames(false); }
+            case "unvanish" -> { if (i == 2) o = vanishNames(true); }
+            case "invrollback", "invrestore" -> {
+                if (i == 2) o = players(false);
+                else if (i == 3) {
+                    o.addAll(List.of("latest", "confirm", "1", "2", "3"));
+                    if (s.hasPermission("creatorhq.invrollback.list")) o.add("list");
+                } else if (i == 4) o.add("confirm");
+            }
             case "jail" -> { if (i == 2) { o = players(false); o.add("set"); } }
             case "nickname" -> { if (i == 2) o = players(false); else if (i == 3) o.add("reset"); }
             case "mute", "ban" -> { if (i == 2) o = players(false); else if (i == 3) o.addAll(DURS); }
@@ -870,14 +1109,17 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
 
     @EventHandler public void onJoin(PlayerJoinEvent e) {
         Player p = e.getPlayer();
-        if (!g("joinMessages") || vanished.contains(p.getUniqueId())) e.setJoinMessage(null);
+        boolean hide = vanished.contains(p.getUniqueId()) && getConfig().getBoolean("vanish.suppress-join-quit", true);
+        if (!g("joinMessages") || hide) e.setJoinMessage(null);
         Bukkit.getScheduler().runTask(this, () -> setup(p));
     }
 
     @EventHandler public void onQuit(PlayerQuitEvent e) {
         Player p = e.getPlayer();
         UUID id = p.getUniqueId();
-        if (!g("leaveMessages") || vanished.contains(id)) e.setQuitMessage(null);
+        boolean hide = vanished.contains(id) && getConfig().getBoolean("vanish.suppress-join-quit", true);
+        if (!g("leaveMessages") || hide) e.setQuitMessage(null);
+        if (!getConfig().getBoolean("vanish.persist", true) && vanished.remove(id)) sp(id, "vanished", null);
         Entity td = tagEntity(id);
         if (td != null) td.remove();
         tags.remove(id);
@@ -909,13 +1151,18 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
         }
     }
 
+    /** Precedence: individual override > global setting > server default (left untouched). */
     @EventHandler(priority = EventPriority.HIGH) public void onDeath(PlayerDeathEvent e) {
         if (!g("deathMessages")) e.setDeathMessage(null);
-        if (g("keepInventory")) {
+        Boolean ov = kiPlayer.get(e.getEntity().getUniqueId());
+        boolean keep = ov != null ? ov : g("keepInventory");
+        if (keep) {
             e.setKeepInventory(true);
             e.getDrops().clear();
-            e.setKeepLevel(true);
-            e.setDroppedExp(0);
+            if (getConfig().getBoolean("keepinventory.keep-level", true)) {
+                e.setKeepLevel(true);
+                e.setDroppedExp(0);
+            }
         }
     }
 
@@ -964,4 +1211,4 @@ public class CreatorHQ extends JavaPlugin implements TabExecutor, Listener {
             if (to.getWorld() != jl.getWorld() || to.distanceSquared(jl) > r * r) e.setTo(jl);
         }
     }
-                         }
+    }
