@@ -32,6 +32,11 @@ permissions:
       creatorhq.vanish.see: true
       creatorhq.mute.bypass: true
       creatorhq.freeze.bypass: true
+      creatorhq.unvanish: true
+      creatorhq.invrollback: true
+      creatorhq.invrollback.list: true
+      creatorhq.keepinventory: true
+      creatorhq.keepinventory.player: true
   creatorhq.advancement:
     default: op
   creatorhq.messages:
@@ -67,4 +72,14 @@ permissions:
   creatorhq.mute.bypass:
     default: op
   creatorhq.freeze.bypass:
+    default: op
+creatorhq.unvanish:
+    default: op
+  creatorhq.invrollback:
+    default: op
+  creatorhq.invrollback.list:
+    default: op
+  creatorhq.keepinventory:
+    default: op
+  creatorhq.keepinventory.player:
     default: op
