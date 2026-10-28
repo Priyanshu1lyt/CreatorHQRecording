@@ -1,0 +1,27 @@
+nickname:
+  chat-format: "{name}: {message}"
+  allow-colors: false
+  max-length: 32
+punish:
+  max-duration-days: 365
+ban:
+  screen-message: "You are banned"
+  show-reason: false
+jail:
+  restrict-movement: true
+  radius: 5.0
+freeze:
+  persist: true
+give:
+  max-amount: 2304
+  drop-leftovers: true
+givekit:
+  include-source: true
+  cooldown-seconds: 3
+clearitems:
+  include-armor: true
+  include-offhand: true
+removeitem:
+  default-material: ""
+audit:
+  enabled: true
